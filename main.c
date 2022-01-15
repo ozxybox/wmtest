@@ -19,7 +19,7 @@
 #define FRAME_PAD_WIDTH (FRAME_PAD_LEFT + FRAME_PAD_RIGHT)
 
 
-typedef struct managedWnd_s
+typedef struct managedWnd_t
 {
     Window client;
     Window frame;
@@ -27,38 +27,61 @@ typedef struct managedWnd_s
 
     int x,y,w,h;
 
-    struct managedWnd_s* last;
+    struct managedWnd_t* last, *next;
 } managedWnd_t;
+
+int s_wmRunning = 1;
 
 Display* g_display;
 XFontStruct* g_font;
 Window g_rootWindow;
+Cursor g_handCursor;
+Screen* g_screen;
 
 managedWnd_t* g_managedWindows = 0;
-
 managedWnd_t* g_focusWnd = 0;
+
+
+struct 
+{
+    Window wnd;
+    GC gc;
+
+    int w,h;
+} g_desktopWnd;
 
 void setWindowPos(Window wnd, int x, int y)
 {
-        XWindowChanges wc;
-        wc.x = x;
-        wc.y = y;
-        XConfigureWindow(g_display, wnd, CWX|CWY, &wc);
-        XSync(g_display, False);
+    XWindowChanges wc;
+    wc.x = x;
+    wc.y = y;
+    XConfigureWindow(g_display, wnd, CWX|CWY, &wc);
+    XSync(g_display, False);
 }
 
 void setWindowGeo(Window wnd, int x, int y, int w, int h)
 {
-        XWindowChanges wc;
-        wc.x = x;
-        wc.y = y;
-        wc.width = w;
-        wc.height = h;
-        //wc.border_width = 20;
-        XConfigureWindow(g_display, wnd, CWX|CWY|CWWidth|CWHeight/*|CWBorderWidth*/, &wc);
-        XSync(g_display, False);
+    XWindowChanges wc;
+    wc.x = x;
+    wc.y = y;
+    wc.width = w;
+    wc.height = h;
+    //wc.border_width = 20;
+    XConfigureWindow(g_display, wnd, CWX|CWY|CWWidth|CWHeight/*|CWBorderWidth*/, &wc);
+    XSync(g_display, False);
 }
 
+managedWnd_t* getManaged(Window wnd)
+{
+    for(managedWnd_t* m = g_managedWindows; m; m = m->last)
+    {
+        if(m->frame == wnd)
+            return 0;
+        if(m->client == wnd)
+            return m;
+    }
+    return 0;
+}
 /*
 void drawTitleBar(titleBar_t* bar)
 {
@@ -146,6 +169,48 @@ void invertGCColor(int invert, GC gc)
         XSetForeground(g_display, gc, BlackPixel(g_display, DefaultScreen(g_display)));
     }
 }
+
+
+void createDesktopWindow()
+{
+	Window wnd = XCreateSimpleWindow(g_display, g_rootWindow, 0, 0, g_screen->width, g_screen->height,
+            0, g_screen->white_pixel,
+            g_screen->black_pixel);
+
+    XSelectInput(g_display, wnd, KeyPressMask | ExposureMask | ButtonPressMask | ButtonReleaseMask | StructureNotifyMask);
+
+    GC gc = XCreateGC(g_display, wnd, 0, NULL);
+    XSetFont(g_display, gc, g_font->fid);
+
+	XMapWindow(g_display,wnd);
+
+    // Send it to the bottom so it doesn't cover over anything
+    XLowerWindow(g_display, wnd);
+
+    XSetBackground(g_display, gc, g_screen->black_pixel);
+    XSetForeground(g_display, gc, g_screen->white_pixel);
+
+    g_desktopWnd.wnd = wnd;
+    g_desktopWnd.gc = gc;
+    g_desktopWnd.w = g_screen->width;
+    g_desktopWnd.h = g_screen->height;
+}
+
+
+void paintDesktop()
+{
+    const int barsz = 5;
+    
+    const int xinc = barsz * 16;
+    const int yinc = barsz * 16;
+
+    int w = g_desktopWnd.w, h = g_desktopWnd.h;
+
+    for(int y = 0; y < h; y += yinc)
+    for(int x = y / yinc % 2 == 0 ? 0 : yinc * 0.5f; x < w; x += xinc)
+        XFillRectangle(g_display, g_desktopWnd.wnd, g_desktopWnd.gc, x, y, barsz, barsz);
+}
+
 void paintDecorations(managedWnd_t* mng)
 {
     XTextProperty name;
@@ -178,25 +243,23 @@ void paintDecorations(managedWnd_t* mng)
     XDrawString(g_display, mng->frame, mng->gc, mng->w - extents.width, extents.ascent, str, len);
 }
 
-void createTitleBar(managedWnd_t* mng)
+void createFrame(managedWnd_t* mng)
 {
-    int screen_num = DefaultScreen(g_display);
-	Window bar = XCreateSimpleWindow(g_display, g_rootWindow, mng->x, mng->y, mng->w + FRAME_PAD_WIDTH, mng->h + FRAME_PAD_HEIGHT,
-            0, BlackPixel(g_display,screen_num),
-            WhitePixel(g_display,screen_num));
+	Window bar = XCreateSimpleWindow(g_display, g_desktopWnd.wnd, mng->x, mng->y, mng->w + FRAME_PAD_WIDTH, mng->h + FRAME_PAD_HEIGHT,
+            0, g_screen->white_pixel,
+            g_screen->black_pixel);
 
     XSelectInput(g_display, bar, KeyPressMask | ExposureMask | ButtonPressMask | ButtonReleaseMask | StructureNotifyMask);
 
     GC gc = XCreateGC(g_display, bar, 0, NULL);
     XSetFont (g_display, gc, g_font->fid);
 
-	XMapWindow(g_display,bar);
 
     mng->gc = gc;
     mng->frame = bar;
 }
 
-void manageWindow(Window wnd, XWindowAttributes* att)
+managedWnd_t* manageWindow(Window wnd, XWindowAttributes* att)
 {
     managedWnd_t* mng = malloc(sizeof(managedWnd_t));
 
@@ -207,44 +270,159 @@ void manageWindow(Window wnd, XWindowAttributes* att)
 
     mng->client = wnd;
 
-    createTitleBar(mng);
-
+    createFrame(mng);
+    
+    XAddToSaveSet(g_display, wnd);
     XReparentWindow(g_display, wnd, mng->frame, FRAME_PAD_LEFT, FRAME_PAD_TOP);
 
+    XMapWindow(g_display, mng->frame);
+
     mng->last = g_managedWindows;
+    mng->next = 0;
+    if(g_managedWindows)
+        g_managedWindows->next = mng;
     g_managedWindows = mng;
+
+    printf("Managing new window\n");
+
+
+    return mng;
 }
 
+/*
 void checkManage(Window wnd)
 {
+    // Is it the desktop?
+    if(wnd == g_desktopWnd.wnd)
+        return;
+
     // Do we manage this already?
-    // FIXME: Don't run this on push of existing windows!
-    for(managedWnd_t* mng = g_managedWindows; mng; mng = mng->last)
+    managedWnd_t* mng = 0;
+    for(managedWnd_t* m = g_managedWindows; m; m = mng->last)
     {
-        if(mng->frame == wnd || mng->client == wnd)
+        if(m->client == wnd)
+        {
+            mng = m;
+            break;
+        }
+
+        // Don't do work on frames!
+        if(m->frame == wnd)
             return;
     }
+
 
     XWindowAttributes att;
     if(!XGetWindowAttributes(g_display, wnd, &att))
         return;
-
     if(att.override_redirect || att.class == InputOnly
     || att.map_state == IsUnmapped )
         return;
 
     // Is it a normal window?
+    int state = WithdrawnState;
     XWMHints *wmhints = XGetWMHints(g_display, wnd);
+    if(wmhints)
+    {
+        if(wmhints->flags & StateHint)
+            state = wmhints->initial_state;
+        XFree(wmhints);
+    }
+  /*
     if (wmhints) {
         int dock = ((wmhints->flags & StateHint) && wmhints->initial_state != NormalState);
-        XFree(wmhints);
         if(dock)
             return;
     }
+  * /
 
-    // Manage it
-    manageWindow(wnd, &att);
+    switch (state) {
+    case WithdrawnState:
+        if(mng)
+        {
+            // Already tracking it!
+            return;
+        }
+
+        // Manage it
+
+        // Fall through
+        // NO break
+    case NormalState:
+        break;
+    case IconicState:
+        break;
+    }
+
+    if(!mng)
+    {
+        mng = manageWindow(wnd, &att);
+        if(mng)
+        {
+            //XMapWindow(g_display, mng->client);
+            XMapWindow(g_display, mng->frame);
+        }
+        
+    }
+/*
+    if(!mng)
+    {
+        //XMapWindow(g_display, mng->frame);
+
+    }
+* /
+
+}*/
+
+void checkManage(Window wnd)
+{
+    if(wnd == g_desktopWnd.wnd)
+        return;
+
+    // Do we manage this already?
+    managedWnd_t* mng = getManaged(wnd);
+
+    XWindowAttributes att;
+    if(!XGetWindowAttributes(g_display, wnd, &att))
+        return;
+
+    if(att.override_redirect || att.class == InputOnly)
+        return;
+
+    
+    int state = WithdrawnState;
+    XWMHints *wmhints = XGetWMHints(g_display, wnd);
+    if(wmhints)
+    {
+        if(wmhints->flags & StateHint)
+        {
+            state = wmhints->initial_state;
+            switch (state) {
+            case WithdrawnState:
+                printf("WithdrawnState\n");
+            case NormalState:
+                printf("NormalState\n");
+
+                break;
+            case IconicState:
+                printf("IconicState\n");
+                break;
+            }
+        }
+        XFree(wmhints);
+    }
+    //else
+    //    setWindowPos(wnd, 20, 20);
+
+    if(!mng)
+    {
+        mng = manageWindow(wnd, &att);
+        XMapWindow(g_display, mng->client);
+    }
+    //XRaiseWindow(g_display, mng->client);       
+    //XRaiseWindow(g_display, mng->frame);    
 }
+
 
 void manageExistingWindows()
 {
@@ -257,6 +435,25 @@ void manageExistingWindows()
     }
     XFree(windows);
 
+}
+
+void unmanageWindow(Window wnd)
+{
+    managedWnd_t* mng = getManaged(wnd);
+    if(!mng)
+        return;
+
+    XReparentWindow(g_display, mng->client, g_rootWindow, mng->x, mng->y);
+    XDestroyWindow(g_display, mng->frame);
+    XRemoveFromSaveSet(g_display, mng->client);
+    if(mng->last)
+        mng->last->next = mng->next;
+    if(mng->next)
+        mng->next->last = mng->last;
+
+    if(g_managedWindows == mng)
+        g_managedWindows = mng->last;
+    free(mng);
 }
 
 void unmanageAll()
@@ -279,6 +476,168 @@ managedWnd_t* findWindowFromTitle(Window wnd)
     return 0;
 }
 
+void exposureEvent(XEvent* event)
+{
+    if (event->xexpose.count != 0)
+        return;
+
+    Window wnd = event->xexpose.window;
+
+    // Are we painting the desktop? Or maybe one of our frames?
+    if(wnd == g_desktopWnd.wnd)
+    {
+        paintDesktop();
+
+    }
+    else
+    {
+        if (event->xexpose.count != 0)
+            return;
+
+        managedWnd_t* mng = findWindowFromTitle(wnd);
+
+        if(mng)
+            paintDecorations(mng);
+    }
+}
+
+void processEvent(XEvent* event)
+{
+    if(event->type == UnmapNotify)
+    {
+        printf("UNMAP\n");
+        unmanageWindow(event->xunmap.window);
+    }
+    else if(event->type == Expose)
+    {  
+        exposureEvent(event);
+    }
+    else if(event->type == KeyPress)
+    {
+#define EXIT_KEY (Mod1Mask|ShiftMask)
+        if((event->xkey.state & EXIT_KEY ) == EXIT_KEY)// && event->xkey.keycode == XK_X)
+        {
+            s_wmRunning = 0;
+            return;
+        }
+        
+        
+    }
+    else if(event->type == MapRequest)
+    {
+        if(event->xmap.window)
+            checkManage(event->xmap.window);
+    }
+    else if(event->type == ConfigureRequest)
+    {
+        XConfigureEvent* xce = &event->xconfigurerequest;
+        managedWnd_t* mng = getManaged(event->xconfigurerequest.window);
+        if(mng)
+        {
+            mng->x = xce->x;
+            mng->y = xce->y;
+            mng->w = xce->width;
+            mng->h = xce->height;
+            setWindowGeo(mng->frame, mng->x, mng->y, mng->w, mng->h);
+            setWindowGeo(mng->client, FRAME_PAD_LEFT, FRAME_PAD_TOP, mng->w - FRAME_PAD_WIDTH, mng->h - FRAME_PAD_HEIGHT);
+        }
+    }
+    else if(event->type == ButtonPress)
+    {
+
+
+        Window bar = event->xbutton.window;
+        managedWnd_t* mng = findWindowFromTitle(bar);
+        if(!mng)
+            return;
+
+        // Change focus
+        XRaiseWindow(g_display, bar);
+        XSetInputFocus(g_display, bar, RevertToParent, CurrentTime);
+
+        // Take the mouse input
+        XGrabPointer(g_display, bar, True,
+                ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                GrabModeAsync, GrabModeAsync,
+                None, g_handCursor, CurrentTime);
+
+        // Right mouse button resizes
+        int resizing = event->xbutton.button == Button3;
+
+        Time lasttime = CurrentTime;
+
+        XWindowAttributes att;
+        if(!XGetWindowAttributes(g_display, bar, &att))
+            return;
+
+        int startx  = event->xmotion.x_root;
+        int starty  = event->xmotion.y_root;
+
+        int deltax = att.x - startx;
+        int deltay = att.y - starty;
+
+        do
+        {
+            XNextEvent(g_display, event);
+            switch(event->type)
+            {
+            case MotionNotify:
+                // No need to update our position more than we can see
+                if ((event->xmotion.time - lasttime) < (1000 / REFRESH_RATE)) continue;
+
+                lasttime = event->xmotion.time;
+
+                if(resizing)
+                {
+                    // Window Resizing
+                    mng->x = att.x;
+                    mng->y = att.y;
+                    mng->w = att.width + event->xmotion.x_root - startx;
+                    mng->h = att.height + event->xmotion.y_root - starty;
+                    if(mng->w < 5)
+                        mng->w = 5;
+                    if(mng->h < 5)
+                        mng->h = 5;
+                        
+                    setWindowGeo(bar, mng->x, mng->y, mng->w, mng->h);
+                    //setWindowGeo(bar, mng->x, mng->y, mng->w, mng->h);
+                    //setWindowGeo(mng->client, FRAME_PAD_LEFT, FRAME_PAD_TOP, mng->w - FRAME_PAD_WIDTH, mng->h - FRAME_PAD_HEIGHT);
+                }
+                else
+                {
+                    // Window Dragging
+                    mng->x = event->xmotion.x_root + deltax;
+                    mng->y = event->xmotion.y_root + deltay;
+                    setWindowPos(bar, mng->x, mng->y);
+                }
+                break;
+            case ButtonPress: // We're already buttonpress
+                break;
+            default:
+                // Route all other events the normal way
+                processEvent(event);
+                break;
+            }
+        } while (event->type != ButtonRelease);
+        
+        if(resizing)
+        {
+            setWindowGeo(mng->client, FRAME_PAD_LEFT, FRAME_PAD_TOP, mng->w - FRAME_PAD_WIDTH, mng->h - FRAME_PAD_HEIGHT);
+        }
+
+        // Release control over the pointer
+        XUngrabPointer(g_display, CurrentTime);
+
+        // Redraw
+        //paintDecorations(mng);
+        //XFlush(display);
+
+        // Swap the focus
+        g_focusWnd = mng;
+    }
+}
+
+
 int main()//int argc, char** args)
 {
 	Display* display = XOpenDisplay(":0");
@@ -291,149 +650,33 @@ int main()//int argc, char** args)
 	}
     g_display = display;
 
-    int screen_num = DefaultScreen(display);
-	Window rootWnd = RootWindow(g_display, screen_num);
+    int screennum = DefaultScreen(display);
+	Window rootWnd = RootWindow(g_display, screennum);
     g_rootWindow = rootWnd;
-    Cursor hand_cursor = XCreateFontCursor(display, XC_hand2);
-
-//XSelectInput(display, RootWindow(display, screen_num),SubstructureNotifyMask);
-
+    g_handCursor = XCreateFontCursor(display, XC_hand2);
+    g_screen = XScreenOfDisplay(g_display, screennum);
+    
     g_font = XLoadQueryFont (g_display, "fixed");
     
+
+    // Create the Desktop Window
+    createDesktopWindow();
+
+    // Manage all of our windows
     //XChangeWindowAttributes(g_display, rootWnd, CWEventMask|CWCursor, &wa);
 	XSelectInput(g_display, rootWnd, SubstructureRedirectMask|SubstructureNotifyMask
 		|ButtonPressMask|StructureNotifyMask|PropertyChangeMask);
-
     manageExistingWindows();
 
-    int run = 1;
+
+    s_wmRunning = 1;
 	XEvent event;
-    while (run) {
+    while (s_wmRunning) {
         XNextEvent(display, &event);
-
-        //XFillRectangle(display, rootWnd, rootGc, 400, 400,100,100);
-        if(event.type == Expose)
-        {
-
-            if (event.xexpose.count != 0)
-                continue;
-            managedWnd_t* mng = findWindowFromTitle(event.xexpose.window);
-
-            if(mng)
-                paintDecorations(mng);
-
-        }
-        else if(event.type == KeyPress)
-        {
-#define EXIT_KEY (Mod1Mask|ShiftMask)
-            if((event.xkey.state & EXIT_KEY ) == EXIT_KEY)
-                run = 0;
-        }
-        else if(event.type == MapRequest)
-        {
-            if(event.xmap.window)
-                checkManage(event.xmap.window);
-        }
-        else if(event.type == ButtonPress)
-        {
-            if(event.xbutton.state & Mod4Mask)
-            {
-                run = 0;
-                continue;
-            }
-
-            Window bar = event.xbutton.window;
-            managedWnd_t* mng = findWindowFromTitle(bar);
-            if(!mng)
-                continue;
-
-            // Change focus
-            XRaiseWindow(g_display, bar);
-            XSetInputFocus(g_display, bar, RevertToParent, CurrentTime);
-
-            // Take the mouse input
-            XGrabPointer(display, bar, True,
-                    ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                    GrabModeAsync, GrabModeAsync,
-                    None, hand_cursor, CurrentTime);
-
-            // Right mouse button resizes
-            int resizing = event.xbutton.button == Button3;
-
-            Time lasttime = CurrentTime;
-
-            XWindowAttributes att;
-            if(!XGetWindowAttributes(g_display, bar, &att))
-                continue;
-
-            int startx  = event.xmotion.x_root;
-            int starty  = event.xmotion.y_root;
-
-            int deltax = att.x - startx;
-            int deltay = att.y - starty;
-
-            do
-            {
-                XNextEvent(display, &event);
-                switch(event.type)
-                {
-                case MotionNotify:
-                    // No need to update our position more than we can see
-                    if ((event.xmotion.time - lasttime) < (1000 / REFRESH_RATE)) continue;
-
-                    lasttime = event.xmotion.time;
-
-                    if(resizing)
-                    {
-                        mng->x = att.x;
-                        mng->y = att.y;
-                        mng->w = att.width + event.xmotion.x_root - startx;
-                        mng->h = att.height + event.xmotion.y_root - starty;
-                        setWindowGeo(bar, mng->x, mng->y, mng->w, mng->h);
-                        setWindowGeo(bar, mng->x, mng->y, mng->w, mng->h);
-                        //setWindowGeo(mng->client, FRAME_PAD_LEFT, FRAME_PAD_TOP, mng->w - FRAME_PAD_WIDTH, mng->h - FRAME_PAD_HEIGHT);
-
-                    }
-                    else
-                    {
-                        mng->x = event.xmotion.x_root + deltax;
-                        mng->y = event.xmotion.y_root + deltay;
-                        setWindowPos(bar, mng->x, mng->y);
-                    }
-
-                }
-            } while (event.type != ButtonRelease);
-            
-            if(resizing)
-            {
-                setWindowGeo(mng->client, FRAME_PAD_LEFT, FRAME_PAD_TOP, mng->w - FRAME_PAD_WIDTH, mng->h - FRAME_PAD_HEIGHT);
-            }
-
-
-            // Release control over the pointer
-            XUngrabPointer(display, CurrentTime);
-
-
-            // Redraw
-            paintDecorations(mng);
-            XFlush(display);
-
-            /*
-            // Push a redraw to the old focus
-            XEvent  exppp;
-            memset(&exppp, 0, sizeof(XEvent));
-            exppp.type = Expose;
-            exppp.xexpose.window = g_focusWnd->window;
-            XSendEvent(display,g_focusWnd->window,False,ExposureMask,&exppp);
-            XFlush(display);
-            */
-
-            // Swap the focus
-            g_focusWnd = mng;
-        }
-
+        processEvent(&event);
+        //sleep(20);
     }
-//	getchar();
+
 
     printf("end!");
 
